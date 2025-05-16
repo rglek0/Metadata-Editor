@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Image Metadata Editor</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 2rem;
+    }
+    input, button {
+      display: block;
+      margin: 1rem 0;
+      padding: 0.5rem;
+      font-size: 1rem;
+    }
+    #preview {
+      max-width: 300px;
+      display: none;
+      margin-bottom: 1rem;
+    }
+    #metaOutput {
+      background: #f0f0f0;
+      padding: 1rem;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <img id="preview" src="#" alt="Preview">
+
+  <h1>Image Metadata Editor</h1>
+  <form action="/upload" method="POST" enctype="multipart/form-data">
+    <label>Select image:</label>
+    <input type="file" name="image" required>
+
+    <label>Date Taken:</label>
+    <input type="datetime-local" name="dateTaken" required>
+
+    <label>Latitude:</label>
+    <input type="number" step="any" name="latitude" required>
+
+    <label>Longitude:</label>
+    <input type="number" step="any" name="longitude" required>
+
+    <button type="submit">Upload & Save Metadata</button>
+    <button type="button" id="getMeta">Preview Metadata</button>
+    <pre id="metaOutput"></pre>
+  </form>
+
+  <script>
+    const fileInput = document.querySelector('input[name="image"]');
+    const preview = document.getElementById('preview');
+    const getMetaBtn = document.getElementById('getMeta');
+    const metaOutput = document.getElementById('metaOutput');
+
+    fileInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (file) {
+        preview.src = URL.createObjectURL(file);
+        preview.style.display = 'block';
+      }
+    });
+
+    getMetaBtn.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      if (!file) return alert("Select a file first.");
+
+      const formData = new FormData();
+      formData.append('image', file);
+
+      try {
+        const res = await fetch('/metadata', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!res.ok) throw new Error("Metadata read failed");
+        const json = await res.json();
+        metaOutput.textContent = JSON.stringify(json, null, 2);
+      } catch (err) {
+        metaOutput.textContent = 'Error reading metadata: ' + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
