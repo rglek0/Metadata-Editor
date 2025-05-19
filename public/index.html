@@ -49,39 +49,54 @@
   </form>
 
   <script>
-    const fileInput = document.querySelector('input[name="image"]');
-    const preview = document.getElementById('preview');
-    const getMetaBtn = document.getElementById('getMeta');
-    const metaOutput = document.getElementById('metaOutput');
+  const fileInput = document.querySelector('input[name="image"]');
+  const preview = document.getElementById('preview');
 
-    fileInput.addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (file) {
-        preview.src = URL.createObjectURL(file);
-        preview.style.display = 'block';
-      }
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (file) {
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = 'block';
+    }
+  });
+
+  document.getElementById('getMeta').addEventListener('click', async () => {
+    const file = fileInput.files[0];
+    if (!file) return alert("Select a file first.");
+
+    const formData = new FormData();
+    formData.append('image', file);
+
+    const res = await fetch('/metadata', {
+      method: 'POST',
+      body: formData
     });
 
-    getMetaBtn.addEventListener('click', async () => {
-      const file = fileInput.files[0];
-      if (!file) return alert("Select a file first.");
+    if (!res.ok) {
+      document.getElementById('metaOutput').textContent = 'Failed to read metadata.';
+      return;
+    }
 
-      const formData = new FormData();
-      formData.append('image', file);
+    const json = await res.json();
+    document.getElementById('metaOutput').textContent = JSON.stringify(json, null, 2);
 
-      try {
-        const res = await fetch('/metadata', {
-          method: 'POST',
-          body: formData
-        });
+    // Try to populate fields if data is available
+    if (json.DateTimeOriginal && typeof json.DateTimeOriginal === 'object') {
+      const dt = json.DateTimeOriginal;
+      const pad = (num) => String(num).padStart(2, '0');
 
-        if (!res.ok) throw new Error("Metadata read failed");
-        const json = await res.json();
-        metaOutput.textContent = JSON.stringify(json, null, 2);
-      } catch (err) {
-        metaOutput.textContent = 'Error reading metadata: ' + err.message;
-      }
-    });
-  </script>
+      const dateStr = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
+      document.querySelector('input[name="dateTaken"]').value = dateStr;
+    }
+
+    if (json.GPSLatitude) {
+      document.querySelector('input[name="latitude"]').value = json.GPSLatitude;
+    }
+
+    if (json.GPSLongitude) {
+      document.querySelector('input[name="longitude"]').value = json.GPSLongitude;
+    }
+  });
+</script>
 </body>
 </html>
