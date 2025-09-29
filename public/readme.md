@@ -10,70 +10,90 @@ node server.js
 ```
 The server will run at `http://localhost:3000`
 
-### Production Mode (IIS + Node.js) - CURRENT SETUP
-**✅ Currently running at: `http://localhost/meta/`**
+### Reverse Proxy (Synology) Notes
+When exposing this app via Synology Reverse Proxy over HTTPS:
+- Set a strong `SESSION_SECRET`.
+- Set `TRUST_PROXY=1` so Express trusts proxy headers.
+- Set `COOKIE_SECURE=1` to send session cookies only over HTTPS.
 
 ## 📁 Project Structure
 ```
-C:\Users\rostg\source\repos\metadata-editor\     # Development workspace (edit here)
-└── public/
-    └── index.html                               # UI files
-└── server.js                                    # Node.js backend
-└── web.config                                   # IIS configuration
-└── uploads/                                     # Image upload directory
-└── temp/                                        # Temporary processing files
-
-C:\inetpub\wwwroot\metadata-editor\              # Production deployment (IIS serves from here)
+metadata-editor/
+├─ public/                # Client UI (index.html, login.html)
+├─ scripts/               # Utility scripts (init-db)
+├─ db/                    # SQLite databases (auth.db, sessions.db)
+├─ temp/                  # Temp files (uploads preview, etc.)
+├─ server.js              # Node.js backend
+├─ package.json
+└─ web.config             # Ignore for local/Synology (legacy)
 ```
 
 ## 🔄 Development Workflow
 
-### 1. Making Changes
-- **Edit files in**: `C:\Users\rostg\source\repos\metadata-editor\`
-- **Test locally**: Run `node server.js` and visit `http://localhost:3000`
-
-### 2. Deploying Changes
+1) Start locally
 ```powershell
-# Sync changes to production
-robocopy "C:\Users\rostg\source\repos\metadata-editor" "C:\inetpub\wwwroot\metadata-editor" /MIR /XD ".git" "node_modules"
+# Option A: .env file
+# 1) Copy .env.example to .env and set SESSION_SECRET (and others if needed)
+# 2) Start normally
+npm start
 
-# Restart Node.js server if needed
-# (The server runs from the IIS location)
+# Option B: set environment vars in the shell
+$env:SESSION_SECRET = "your-long-random-secret"; npm start
 ```
+Open http://localhost:3000/login.html and sign in.
 
-### 3. Version Control
-```bash
-git add .
-git commit -m "Your changes"
-git push origin main
+2) Expose via Synology Reverse Proxy (HTTPS)
+```powershell
+# Using .env (recommended)
+# In .env set:
+# SESSION_SECRET=your-long-random-secret
+# TRUST_PROXY=1
+# COOKIE_SECURE=1
+npm start
 ```
 
 ## 🌐 Access URLs
-- **Production (IIS)**: `http://localhost/meta/`
 - **Development**: `http://localhost:3000`
 - **GitHub Repository**: https://github.com/rglek0/Metadata-Editor
 
-## ⚙️ Technical Setup (Already Configured)
-
-### Prerequisites ✅
-- [x] IIS with URL Rewrite Module
-- [x] Application Request Routing (ARR) 
-- [x] Node.js server running on port 3000
-- [x] Proper file permissions configured
-
-### IIS Configuration ✅
-- **Application**: `/meta` pointing to `C:\inetpub\wwwroot\metadata-editor\`
-- **Application Pool**: `.NET Core`
-- **Permissions**: IIS_IUSRS, DefaultAppPool, .NET Core pool identities
-- **URL Rewrite**: Configured to proxy dynamic requests to Node.js
-
-### How It Works
-1. **Static Files**: IIS serves `index.html` and static assets directly
-2. **Dynamic Requests**: `/upload`, `/metadata` routes are proxied to Node.js server
-3. **File Processing**: ExifTool integration handles metadata operations
-4. **Uploads**: Files stored in `uploads/` directory with proper permissions
+## ⚙️ Notes
+- Upload directory path is configured in `server.js` (currently points to a network share). Ensure the Node process has write permissions.
+- SQLite files are stored in `./db/` (auto-created). Old DBs in `./temp/` are migrated automatically on first run.
 
 ## 🛠️ Troubleshooting
 - **403/404 Errors**: Check file permissions and ensure Node.js server is running
 - **Upload Issues**: Verify `uploads/` directory permissions
 - **Metadata Processing**: Ensure ExifTool is available in the system PATH
+ - **Too many login attempts (429)**: The app rate-limits login attempts by default (10 attempts per 15 minutes). Adjust via `.env`:
+	 - `LOGIN_WINDOW_MS` (default 900000)
+	 - `LOGIN_MAX_ATTEMPTS` (default 10)
+
+## 🔐 Authentication
+
+Authentication is enabled using SQLite and server-side sessions.
+
+- Login page: `/login.html`
+- Protected routes: `/` (app UI), `/upload`, `/metadata`
+
+Create an initial admin user:
+
+```powershell
+npm run seed:user -- <username> <password> [role]
+```
+
+If you omit arguments, you'll be prompted interactively.
+
+When running behind Synology RP, prefer using a .env file:
+
+1. Copy `.env.example` to `.env`
+2. Set:
+	- `SESSION_SECRET=your-long-random-secret`
+	- `TRUST_PROXY=1`
+	- `COOKIE_SECURE=1`
+3. Start the server with `npm start`
+
+Quick test steps:
+1. Seed a user: `npm run seed:user -- admin "yourPassword"`
+2. Start server: `npm start`
+3. Open: `http://localhost:3000/login.html`
+4. After login you’ll be redirected to `/` and can use the app; uploads and metadata preview are protected.
