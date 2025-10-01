@@ -93,6 +93,14 @@ app.get('/healthz', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Session info (who am I?)
+app.get('/me', (req, res) => {
+  if (req.session && req.session.user) {
+    return res.json({ user: req.session.user });
+  }
+  res.status(401).json({ user: null });
+});
+
 // Auth routes
 const loginLimiter = rateLimit({
   windowMs: Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000), // 15 minutes
@@ -101,8 +109,8 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true,
   keyGenerator: (req) => {
-    const u = (req.body && req.body.username) ? String(req.body.username).toLowerCase() : '';
-    return u || req.ip;
+    const u = (req.body && req.body.username) ? String(req.body.username).toLowerCase() : 'anon';
+    return `login:${u}`;
   },
 });
 
@@ -120,6 +128,14 @@ app.post('/login', loginLimiter, async (req, res) => {
 });
 
 app.post('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('connect.sid');
+    res.redirect('/login.html');
+  });
+});
+
+// Convenience: allow GET /logout (e.g., from a link/button)
+app.get('/logout', (req, res) => {
   req.session.destroy(() => {
     res.clearCookie('connect.sid');
     res.redirect('/login.html');
@@ -162,6 +178,7 @@ app.post('/metadata', requireAuth, uploadTemp.single('image'), async (req, res) 
 });
 
 // === Start Server ===
-app.listen(3000, () => {
-  console.log('🚀 Server running at http://localhost:3000');
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });

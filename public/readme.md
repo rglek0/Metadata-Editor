@@ -9,6 +9,7 @@ A web-based image metadata editor that allows you to view and modify EXIF data, 
 node server.js
 ```
 The server will run at `http://localhost:3000`
+If port 3000 is in use, set a different port via `.env`: `PORT=3001`.
 
 ### Reverse Proxy (Synology) Notes
 When exposing this app via Synology Reverse Proxy over HTTPS:
@@ -79,6 +80,12 @@ Create an initial admin user:
 
 ```powershell
 npm run seed:user -- <username> <password> [role]
+```
+
+Change a user's password:
+
+```powershell
+npm run user:password -- <username> "<newPassword>"
 ```
 
 If you omit arguments, you'll be prompted interactively.
