@@ -48,8 +48,10 @@
   <form action="upload" method="POST" enctype="multipart/form-data">
           <label>Select image:</label>
           <input type="file" name="image" required>
-
-          <label>Date Taken:</label>
+          <small id="predictedPath" class="text-info" style="display:none;margin-top:-0.5rem"></small>
+          <button type="button" id="copyPredicted" class="btn btn-xs btn-default" style="display:none;margin-top:4px">Copy Predicted Path</button>
+<br>
+          <label>Date Taken: <small id="origDate" class="text-muted"></small></label>
           <input type="datetime-local" name="dateTaken" required>
 
           <label>Latitude:</label>
@@ -57,7 +59,22 @@
 
           <label>Longitude:</label>
           <input type="number" step="any" name="longitude" required>
-          <button type="submit">Upload & Save Metadata</button>
+          <div class="checkbox">
+            <label>
+              <input type="checkbox" name="repairExif">
+              Repair EXIF before write (use if writes fail on corrupt EXIF)
+            </label>
+          </div>
+          <div class="checkbox">
+            <label>
+              <input type="checkbox" name="preferXmp">
+              Prefer XMP (write metadata as XMP-exif)
+            </label>
+          </div>
+          <div id="metaWarnings" style="display:none" class="alert alert-warning"></div>
+          <div id="uploadResult" style="display:none" class="alert" ></div>
+          <button type="submit" id="uploadBtn">Upload & Save Metadata</button>
+          <button type="button" id="copyFinal" class="btn btn-xs btn-default" style="display:none;margin-left:6px">Copy Final Path</button>
           <button type="button" id="getMeta">Preview Metadata</button>
 
         </form>
@@ -83,11 +100,93 @@
       }
     }).catch(() => {});
 
-    fileInput.addEventListener('change', e => {
+    fileInput.addEventListener('change', async e => {
       const file = e.target.files[0];
       if (file) {
         preview.src = URL.createObjectURL(file);
         preview.style.display = 'block';
+        const pp = document.getElementById('predictedPath');
+        const copyPred = document.getElementById('copyPredicted');
+        pp.style.display = 'block';
+        pp.textContent = 'Computing target path...';
+        copyPred.style.display = 'none';
+        try {
+          const r = await fetch(`path-info?name=${encodeURIComponent(file.name)}`);
+          if (r.ok) {
+            const info = await r.json();
+            pp.textContent = `Will save as: ${info.fullPath}`;
+            pp.dataset.fullPath = info.fullPath;
+            copyPred.style.display = 'inline-block';
+          } else {
+            pp.textContent = 'Unable to compute save path';
+          }
+        } catch {
+          pp.textContent = 'Unable to compute save path';
+        }
+      }
+    });
+
+    // Copy helpers
+    function copyText(value) {
+      if (!value) return;
+      navigator.clipboard.writeText(value).catch(() => {
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = value; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch {} finally { document.body.removeChild(ta); }
+      });
+    }
+    document.getElementById('copyPredicted').addEventListener('click', () => {
+      const pp = document.getElementById('predictedPath');
+      copyText(pp.dataset.fullPath || '');
+    });
+    document.getElementById('copyFinal').addEventListener('click', () => {
+      const ur = document.getElementById('uploadResult');
+      copyText(ur.dataset.fullPath || '');
+    });
+
+    // AJAX upload intercept
+    const form = document.querySelector('form[action="upload"]');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const file = fileInput.files[0];
+      if (!file) return alert('Select a file first.');
+      const fd = new FormData(form);
+      const btn = document.getElementById('uploadBtn');
+      const resultBox = document.getElementById('uploadResult');
+      const copyFinalBtn = document.getElementById('copyFinal');
+      btn.disabled = true; btn.textContent = 'Uploading...';
+      resultBox.style.display = 'none';
+      copyFinalBtn.style.display = 'none';
+      try {
+        const resp = await fetch('upload', { method: 'POST', body: fd, headers: { 'Accept': 'application/json' } });
+        const isJson = resp.headers.get('content-type') && resp.headers.get('content-type').includes('application/json');
+        if (!resp.ok) {
+          let msg = 'Upload failed';
+          if (isJson) { const j = await resp.json().catch(()=>null); if (j && j.error) msg = j.error; }
+          resultBox.className = 'alert alert-danger';
+          resultBox.textContent = msg;
+          resultBox.style.display = 'block';
+          return;
+        }
+        let data;
+        if (isJson) {
+          data = await resp.json();
+        } else {
+          const text = await resp.text();
+          data = { message: text };
+        }
+        resultBox.className = 'alert alert-success';
+        const line = data.fullPath ? `Saved to: ${data.fullPath}` : (data.message || 'Upload complete');
+        resultBox.textContent = line;
+        if (data.fullPath) { resultBox.dataset.fullPath = data.fullPath; copyFinalBtn.style.display = 'inline-block'; }
+        resultBox.style.display = 'block';
+      } catch (err) {
+        resultBox.className = 'alert alert-danger';
+        resultBox.textContent = 'Upload error';
+        resultBox.style.display = 'block';
+      } finally {
+        btn.disabled = false; btn.textContent = 'Upload & Save Metadata';
       }
     });
 
@@ -111,21 +210,67 @@
       const json = await res.json();
       document.getElementById('metaOutput').textContent = JSON.stringify(json, null, 2);
 
-      // Try to populate fields if data is available
-      if (json.DateTimeOriginal && typeof json.DateTimeOriginal === 'object') {
-        const dt = json.DateTimeOriginal;
-        const pad = (num) => String(num).padStart(2, '0');
+      const warnings = [];
 
-        const dateStr = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
+      // Helper pads
+      const pad = (num) => String(num).padStart(2, '0');
+
+      // Strict precedence for capture date
+      const rawDate = json.DateTimeOriginal || json.CreateDate || json.DateTimeDigitized || json.DateCreated || json.ModifyDate;
+      const origDateEl = document.getElementById('origDate');
+      if (rawDate) {
+        origDateEl.textContent = `(original: ${typeof rawDate === 'object' ? `${rawDate.year}-${pad(rawDate.month)}-${pad(rawDate.day)} ${pad(rawDate.hour)}:${pad(rawDate.minute)}` : rawDate})`;
+      } else {
+        origDateEl.textContent = '(no original date)';
+        warnings.push('No EXIF date/time tag found (DateTimeOriginal / CreateDate).');
+      }
+
+      // Normalize date into datetime-local format
+      let dateStr = '';
+      if (rawDate) {
+        if (typeof rawDate === 'object' && rawDate.year) {
+          dateStr = `${rawDate.year}-${pad(rawDate.month)}-${pad(rawDate.day)}T${pad(rawDate.hour)}:${pad(rawDate.minute)}`;
+        } else if (typeof rawDate === 'string') {
+          const m = rawDate.match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2})/);
+          if (m) dateStr = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`;
+        }
+      }
+      if (dateStr) {
         document.querySelector('input[name="dateTaken"]').value = dateStr;
       }
 
-      if (json.GPSLatitude) {
-        document.querySelector('input[name="latitude"]').value = json.GPSLatitude;
+      // GPS parsing
+      function parseGps(val) {
+        if (val == null) return null;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const simple = parseFloat(val);
+          if (!isNaN(simple)) return simple;
+          const dms = val.match(/(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/);
+          if (dms) {
+            const d = parseFloat(dms[1]);
+            const m2 = parseFloat(dms[2]);
+            const s = parseFloat(dms[3]);
+            let dec = d + (m2/60) + (s/3600);
+            if (/S|W/i.test(val)) dec = -dec;
+            return dec;
+          }
+        }
+        return null;
       }
+      const lat = parseGps(json.GPSLatitude);
+      const lon = parseGps(json.GPSLongitude);
+      if (lat != null) document.querySelector('input[name="latitude"]').value = lat; else warnings.push('No EXIF GPSLatitude found.');
+      if (lon != null) document.querySelector('input[name="longitude"]').value = lon; else warnings.push('No EXIF GPSLongitude found.');
 
-      if (json.GPSLongitude) {
-        document.querySelector('input[name="longitude"]').value = json.GPSLongitude;
+      // Show warnings if any
+      const warnBox = document.getElementById('metaWarnings');
+      if (warnings.length) {
+        warnBox.style.display = 'block';
+        warnBox.innerHTML = warnings.map(w => `<div>${w}</div>`).join('');
+      } else {
+        warnBox.style.display = 'none';
+        warnBox.textContent = '';
       }
     });
   </script>

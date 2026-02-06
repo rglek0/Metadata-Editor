@@ -12,17 +12,54 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 
 // === Paths ===
-const uploadDir = path.resolve('\\\\SNAS\\home\\Images\\meta-set');
+// Allow overriding the final output directory via environment variable OUTPUT_DIR.
+// If not set, fall back to previous network path or a local ./uploads directory.
+// NOTE: On Windows, an absolute path like C:\\Users\\rostg\\SynologyDrive\\Images\\meta-set can be provided.
+const defaultOutput = process.platform === 'win32'
+  ? 'C:/Users/rostg/SynologyDrive/Images/meta-set'
+  : '/volume1/homes/Images/meta-set';
+const uploadDir = path.resolve(process.env.OUTPUT_DIR || defaultOutput);
 const tempDir = path.resolve('./temp');
 
 // === Ensure directories exist ===
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-// === Multer Storage: Final (preserve original filename) ===
+// === Multer Storage: Final (choose available filename with (index) collision handling) ===
 const storageFinal = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, file.originalname)
+  filename: (req, file, cb) => {
+    const base = path.basename(file.originalname).replace(/[\\/]+/g, '').trim();
+    const safeName = base || 'image';
+    const ext = path.extname(safeName);
+    const nameOnly = path.basename(safeName, ext);
+    let candidate = safeName;
+    let candidatePath = path.join(uploadDir, candidate);
+    const existsFile = () => {
+      try {
+        const st = fs.statSync(candidatePath);
+        return st.isFile();
+      } catch (e) {
+        return false; // ENOENT
+      }
+    };
+    if (existsFile()) {
+      let i = 1;
+      while (true) {
+        candidate = `${nameOnly} (${i})${ext}`;
+        candidatePath = path.join(uploadDir, candidate);
+        try {
+          const st = fs.statSync(candidatePath);
+          if (!st.isFile()) break; // not a file -> ok to use
+        } catch (e) {
+          break; // ENOENT -> available
+        }
+        i++;
+      }
+    }
+    console.log(`[multer] incoming="${file.originalname}", chosen="${candidate}", uploadDir="${uploadDir}"`);
+    cb(null, candidate);
+  }
 });
 
 const uploadFinal = multer({ storage: storageFinal });
@@ -142,23 +179,87 @@ app.get('/logout', (req, res) => {
   });
 });
 
+// Helper: convert HTML datetime-local (YYYY-MM-DDTHH:MM[:SS]) to EXIF format (YYYY:MM:DD HH:MM:SS)
+function toExifDate(local) {
+  if (!local) return undefined;
+  const s = String(local);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return s; // pass through if unexpected
+  return `${m[1]}:${m[2]}:${m[3]} ${m[4]}:${m[5]}:${m[6] || '00'}`;
+}
+
 // === Upload and Save Metadata Route ===
 app.post('/upload', requireAuth, uploadFinal.single('image'), async (req, res) => {
-  const { dateTaken, latitude, longitude } = req.body;
-  const filePath = path.join(uploadDir, req.file.originalname);
+  const { dateTaken, latitude, longitude, repairExif, preferXmp } = req.body;
+  // Multer has already chosen an available filename using (index) logic
+  const savedName = (req.file && (req.file.filename || req.file.originalname)) || 'image';
+  const targetPath = path.join(uploadDir, savedName);
 
   try {
-    await exiftool.write(filePath, {
-      DateTimeOriginal: dateTaken,
+    // Multer already saved to targetPath; no rename needed.
+
+    const exifDate = toExifDate(dateTaken);
+    const exifTags = {
+      DateTimeOriginal: exifDate,
       GPSLatitude: parseFloat(latitude),
       GPSLongitude: parseFloat(longitude),
       GPSLatitudeRef: parseFloat(latitude) >= 0 ? 'N' : 'S',
       GPSLongitudeRef: parseFloat(longitude) >= 0 ? 'E' : 'W',
-    });
+    };
+    const xmpTags = {
+      'XMP-exif:DateTimeOriginal': exifDate,
+      'XMP-exif:GPSLatitude': parseFloat(latitude),
+      'XMP-exif:GPSLongitude': parseFloat(longitude),
+      'XMP-exif:GPSLatitudeRef': parseFloat(latitude) >= 0 ? 'N' : 'S',
+      'XMP-exif:GPSLongitudeRef': parseFloat(longitude) >= 0 ? 'E' : 'W',
+    };
 
-    res.send('✅ Metadata updated successfully.');
+    const doRepair = String(repairExif).toLowerCase() === 'on' || repairExif === '1' || String(repairExif).toLowerCase() === 'true';
+    const useXmp = String(preferXmp).toLowerCase() === 'on' || preferXmp === '1' || String(preferXmp).toLowerCase() === 'true';
+
+    try {
+      if (useXmp) {
+        await exiftool.write(targetPath, xmpTags, ['-m']);
+      } else {
+        if (doRepair) {
+          await exiftool.write(targetPath, {}, ['-m', '-exif:all=']);
+        }
+        await exiftool.write(targetPath, exifTags, ['-m', '-IFD0:ApplicationNotes=']);
+      }
+    } catch (err) {
+      const msg = String(err && err.message || err);
+      const badOffset = /Bad IFD0 offset/i.test(msg) || /ApplicationNotes/i.test(msg);
+      if (!useXmp && (badOffset || doRepair)) {
+        // Attempt repair then exif write, otherwise fallback to XMP
+        try {
+          await exiftool.write(targetPath, {}, ['-m', '-exif:all=']);
+          await exiftool.write(targetPath, exifTags, ['-m']);
+        } catch (err2) {
+          await exiftool.write(targetPath, xmpTags, ['-m']);
+        }
+      } else if (!useXmp) {
+        // Non-repairable EXIF error: fallback to XMP as last resort
+        await exiftool.write(targetPath, xmpTags, ['-m']);
+      } else {
+        throw err;
+      }
+    }
+  const storedFilename = path.basename(targetPath);
+    // Respect Accept header: if client requests JSON, return structured response
+    if (req.accepts(['json', 'html', 'text']) === 'json') {
+      return res.json({
+        ok: true,
+        message: 'Metadata updated successfully.',
+        storedFilename,
+        fullPath: targetPath
+      });
+    }
+    res.send(`✅ Metadata updated successfully. Saved as ${storedFilename}`);
   } catch (error) {
     console.error('❌ Error writing metadata:', error);
+    if (req.accepts(['json', 'html', 'text']) === 'json') {
+      return res.status(500).json({ ok: false, error: 'Failed to update metadata.' });
+    }
     res.status(500).send('Failed to update metadata.');
   }
 });
@@ -175,6 +276,29 @@ app.post('/metadata', requireAuth, uploadTemp.single('image'), async (req, res) 
     console.error('❌ Error reading metadata:', err);
     res.status(500).send('Metadata read failed');
   }
+});
+
+// === Path Info (predict final save path without writing) ===
+app.get('/path-info', requireAuth, (req, res) => {
+  const nameParam = req.query.name;
+  if (!nameParam) return res.status(400).json({ error: 'name query param required' });
+  const base = path.basename(String(nameParam)).replace(/[\\/]+/g, '').trim();
+  const safeName = base || 'image';
+  const ext = path.extname(safeName);
+  const nameOnly = path.basename(safeName, ext);
+  let candidate = path.join(uploadDir, safeName);
+  const existsFile = (p) => {
+    try { const st = fs.statSync(p); return st.isFile(); } catch (e) { return false; }
+  };
+  if (existsFile(candidate)) {
+    let i = 1;
+    while (true) {
+      const alt = path.join(uploadDir, `${nameOnly} (${i})${ext}`);
+      if (!existsFile(alt)) { candidate = alt; break; }
+      i++;
+    }
+  }
+  return res.json({ original: nameParam, storedFilename: path.basename(candidate), fullPath: candidate });
 });
 
 // === Start Server ===
